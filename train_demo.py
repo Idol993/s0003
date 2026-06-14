@@ -314,7 +314,7 @@ def train(config):
                 f"Step {step}/{config.max_steps} | "
                 f"Loss: {avg('loss/train'):.4f} "
                 f"(aux={avg('loss/aux'):.4f}) | "
-                f"CV²: {balance_cv:.4f} | "
+                f"CV^2: {balance_cv:.4f} | "
                 f"Ratio: {balance_ratio:.2f} | "
                 f"Util: {util_max*100:.1f}%/{util_min*100:.1f}% | "
                 f"Under: {num_under} Over: {num_over} | "
@@ -329,7 +329,7 @@ def train(config):
 
             if balance_cv < best_balance and step > warmup_steps and not math.isnan(balance_cv):
                 best_balance = balance_cv
-                logger.info(f"  [IMPROVED] Best balance CV²: {best_balance:.6f}")
+                logger.info(f"  [IMPROVED] Best balance CV^2: {best_balance:.6f}")
 
             lambdas = report["lambda_stats"]
             logger.info(
@@ -371,7 +371,7 @@ def train(config):
     logger.info("\n" + "="*60)
     logger.info("TRAINING SUMMARY")
     logger.info("="*60)
-    logger.info(f"Final Balance CV²: {history.get('util/cv_sq', [float('nan')])[-1]:.6f}")
+    logger.info(f"Final Balance CV^2: {history.get('util/cv_sq', [float('nan')])[-1]:.6f}")
     logger.info(f"Final Balance Ratio: {history.get('util/balance_ratio', [float('nan')])[-1]:.2f}")
     logger.info(f"Final Underutilized: {final_report.get('num_under', 'N/A')} / {config.num_experts}")
     logger.info(f"Final Overutilized: {final_report.get('num_over', 'N/A')} / {config.num_experts}")
@@ -417,8 +417,8 @@ def main():
     logger.info(f"Batch: {args.batch_size}x{args.seq_len}, Steps: {args.max_steps}")
     logger.info(f"Inject Extreme Imbalance: {args.inject_imbalance}")
     if args.inject_imbalance:
-        logger.warning("  ⚠️  地狱级困难模式: Only ~2% experts will be initially activated!")
-        logger.warning("  ⚠️  Expected initial CV² >> 100, should recover to < 0.5 ideally")
+        logger.warning("  [WARN] Hell difficulty: Only ~2% experts will be initially activated!")
+        logger.warning("  [WARN] Expected initial CV^2 >> 100, should recover to < 0.5 ideally")
     logger.info("=" * 60)
 
     train(args)

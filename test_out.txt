@@ -1,0 +1,43 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.2, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\86181\AppData\Local\Programs\Python\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Worksolo\s0003
+plugins: anyio-4.13.0
+collecting ... collected 34 items
+
+tests/test_moe_balancer.py::TestUtils::test_cosine_similarity PASSED     [  2%]
+tests/test_moe_balancer.py::TestUtils::test_gumbel_softmax PASSED        [  5%]
+tests/test_moe_balancer.py::TestUtils::test_safe_softmax PASSED          [  8%]
+tests/test_moe_balancer.py::TestExpertLayer::test_activation_variants PASSED [ 11%]
+tests/test_moe_balancer.py::TestExpertLayer::test_gradient_flow PASSED   [ 14%]
+tests/test_moe_balancer.py::TestExpertLayer::test_single_expert PASSED   [ 17%]
+tests/test_moe_balancer.py::TestExpertGroup::test_expert_representations PASSED [ 20%]
+tests/test_moe_balancer.py::TestExpertGroup::test_group_forward_small PASSED [ 23%]
+tests/test_moe_balancer.py::TestExpertGroup::test_large_expert_count_params PASSED [ 26%]
+tests/test_moe_balancer.py::TestMovingAverageUtilizationTracker::test_extreme_imbalance_detection PASSED [ 29%]
+tests/test_moe_balancer.py::TestMovingAverageUtilizationTracker::test_load_imbalance_penalty PASSED [ 32%]
+tests/test_moe_balancer.py::TestMovingAverageUtilizationTracker::test_priority_scores PASSED [ 35%]
+tests/test_moe_balancer.py::TestMovingAverageUtilizationTracker::test_state_dict_save_load PASSED [ 38%]
+tests/test_moe_balancer.py::TestMovingAverageUtilizationTracker::test_update_tracking PASSED [ 41%]
+tests/test_moe_balancer.py::TestExpertSimilarityClusterer::test_kmeans_clustering PASSED [ 44%]
+tests/test_moe_balancer.py::TestExpertSimilarityClusterer::test_redistribution_mapping PASSED [ 47%]
+tests/test_moe_balancer.py::TestExpertSimilarityClusterer::test_similarity_matrix PASSED [ 50%]
+tests/test_moe_balancer.py::TestExpertSimilarityClusterer::test_top_k_similar PASSED [ 52%]
+tests/test_moe_balancer.py::TestLagrangianBalancer::test_bias_correction PASSED [ 55%]
+tests/test_moe_balancer.py::TestLagrangianBalancer::test_constraint_violations PASSED [ 58%]
+tests/test_moe_balancer.py::TestLagrangianBalancer::test_multiplier_update PASSED [ 61%]
+tests/test_moe_balancer.py::TestLagrangianBalancer::test_penalty_computation PASSED [ 64%]
+tests/test_moe_balancer.py::TestLagrangianBalancer::test_router_z_loss PASSED [ 67%]
+tests/test_moe_balancer.py::TestSmartMoEGate::test_force_assign_triggers PASSED [ 70%]
+tests/test_moe_balancer.py::TestSmartMoEGate::test_forward_shapes PASSED [ 73%]
+tests/test_moe_balancer.py::TestSmartMoEGate::test_gradient_through_gate PASSED [ 76%]
+tests/test_moe_balancer.py::TestSmartMoEGate::test_top_k_indices_range PASSED [ 79%]
+tests/test_moe_balancer.py::TestDistributedMoELayer::test_balance_recovery_from_extreme_imbalance PASSED [ 82%]
+tests/test_moe_balancer.py::TestDistributedMoELayer::test_end_to_end_forward PASSED [ 85%]
+tests/test_moe_balancer.py::TestDistributedMoELayer::test_full_backward_pass PASSED [ 88%]
+tests/test_moe_balancer.py::TestDistributedMoELayer::test_get_balance_report PASSED [ 91%]
+tests/test_moe_balancer.py::TestIntegrationDeadlockResolution::test_cluster_based_redirect PASSED [ 94%]
+tests/test_moe_balancer.py::TestIntegrationDeadlockResolution::test_force_assign_does_not_crash_training PASSED [ 97%]
+tests/test_moe_balancer.py::TestIntegrationDeadlockResolution::test_lagrangian_lambda_dynamics PASSED [100%]
+
+============================= 34 passed in 22.23s =============================

@@ -414,7 +414,7 @@ def print_routing_report(
         logger.info(f"  Min:      {util_metrics.util_min*100:6.3f}%")
         logger.info(f"  Mean:     {util_metrics.util_mean*100:6.3f}%")
         logger.info(f"  Std:      {util_metrics.util_std*100:6.3f}%")
-        logger.info(f"  CV²:      {util_metrics.util_cv_sq:8.4f}  <-- smaller = better, ideal < 0.1")
+        logger.info(f"  CV^2:      {util_metrics.util_cv_sq:8.4f}  <-- smaller = better, ideal < 0.1")
         logger.info(f"  Balance ratio:   {util_metrics.balance_ratio:8.2f}x <-- Max/Min, ideal < 1.5")
         logger.info(f"  Underutilized: {util_metrics.underutilized_count:4d}  / {num_experts}")
         logger.info(f"  Overutilized:  {util_metrics.overutilized_count:4d}  / {num_experts}")
@@ -661,84 +661,250 @@ def run_ablation(config):
             return float("nan")
         return sum(lst[-last_n:]) / max(len(lst[-last_n:]), 1)
 
-    def get_last(history, key, default=float("nan")):
+    def get_last(history, key):
         vals = history.get(key, [])
-        return vals[-1] if vals else default
+        return vals[-1] if vals else float("nan")
+
+    def is_valid(v):
+        return not (isinstance(v, float) and math.isnan(v))
+
+    def format_val(v, fmt, is_pct=False, is_int=False):
+        if not is_valid(v):
+            return "MISSING           "
+        if is_int:
+            return f"{int(v):<20d}"
+        if is_pct:
+            return f"{v*100:<19.2f}%"
+        return f"{v:{fmt}}"
+
+    METRIC_SPECS = [
+        {
+            "name": "Task Loss (avg last 50)",
+            "key": "loss/task",
+            "mode": "avg",
+            "fmt": "<20.4f",
+            "delta_fmt": ">+14.4f",
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": False,
+        },
+        {
+            "name": "Aux Loss (avg last 50)",
+            "key": "loss/aux",
+            "mode": "avg",
+            "fmt": "<20.4f",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": False,
+        },
+        {
+            "name": "Final Utilization CV^2",
+            "key": "util/util_cv_sq",
+            "mode": "last",
+            "fmt": "<20.4f",
+            "delta_fmt": ">+13.1f",
+            "delta_pct": True,
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": False,
+            "primary": True,
+        },
+        {
+            "name": "Final Utilization Variance",
+            "key": "util/util_variance",
+            "mode": "last",
+            "fmt": "<20.6f",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": False,
+        },
+        {
+            "name": "Final Util Max",
+            "key": "util/util_max",
+            "mode": "last",
+            "fmt": "<19.2f%",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": True,
+            "is_int": False,
+        },
+        {
+            "name": "Final Util Min",
+            "key": "util/util_min",
+            "mode": "last",
+            "fmt": "<19.2f%",
+            "delta_fmt": "",
+            "higher_better": True,
+            "is_pct": True,
+            "is_int": False,
+        },
+        {
+            "name": "Final Balance Ratio (Max/Min)",
+            "key": "util/balance_ratio",
+            "mode": "last",
+            "fmt": "<20.2f",
+            "delta_fmt": ">+13.1f",
+            "delta_pct": True,
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": False,
+        },
+        {
+            "name": "Underutilized Experts",
+            "key": "util/underutilized_count",
+            "mode": "last",
+            "fmt": "<20d",
+            "delta_fmt": ">+12d",
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": True,
+        },
+        {
+            "name": "Long-tail Experts (<30% mean)",
+            "key": "util/long_tail_experts_count",
+            "mode": "last",
+            "fmt": "<20d",
+            "delta_fmt": ">+12d",
+            "higher_better": False,
+            "is_pct": False,
+            "is_int": True,
+        },
+        {
+            "name": "Unique Experts Activated",
+            "key": "routing/unique_experts_used",
+            "mode": "last",
+            "fmt": "<20d",
+            "delta_fmt": ">+12d",
+            "higher_better": True,
+            "is_pct": False,
+            "is_int": True,
+        },
+        {
+            "name": "Top-1 Expert Share",
+            "key": "routing/top1_expert_share",
+            "mode": "last",
+            "fmt": "<19.2f%",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": True,
+            "is_int": False,
+        },
+        {
+            "name": "Force-Assign Only %",
+            "key": "routing/force_ratio",
+            "mode": "avg",
+            "fmt": "<19.1f%",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": True,
+            "is_int": False,
+        },
+        {
+            "name": "Cluster-Redirect Only %",
+            "key": "routing/redirect_ratio",
+            "mode": "avg",
+            "fmt": "<19.1f%",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": True,
+            "is_int": False,
+        },
+        {
+            "name": "Both Force+Redirect %",
+            "key": "routing/both_ratio",
+            "mode": "avg",
+            "fmt": "<19.1f%",
+            "delta_fmt": "",
+            "higher_better": False,
+            "is_pct": True,
+            "is_int": False,
+        },
+    ]
 
     logger.info(f"{'Metric':<35} {'Baseline (No Bal)':<20} {'Ours (With Bal)':<20} {'Delta':<15}")
     logger.info("-" * 90)
 
-    baseline_task = avg(baseline.get("loss/task", []))
-    ours_task = avg(ours.get("loss/task", []))
-    task_delta = ours_task - baseline_task
-    logger.info(f"{'Task Loss (avg last 50)':<35} {baseline_task:<20.4f} {ours_task:<20.4f} {task_delta:>+14.4f}")
+    missing_metrics = []
+    metric_values = {}
 
-    baseline_aux = avg(baseline.get("loss/aux", []))
-    ours_aux = avg(ours.get("loss/aux", []))
-    logger.info(f"{'Aux Loss (avg last 50)':<35} {baseline_aux:<20.4f} {ours_aux:<20.4f} {'':<15}")
+    for spec in METRIC_SPECS:
+        name = spec["name"]
+        key = spec["key"]
+        mode = spec["mode"]
 
-    baseline_cv = get_last(baseline, "util/util_cv_sq")
-    ours_cv = get_last(ours, "util/util_cv_sq")
-    cv_improvement = (1 - ours_cv / max(baseline_cv, 1e-9)) * 100 if baseline_cv > 0 else float("nan")
-    logger.info(f"{'Final Utilization CV²':<35} {baseline_cv:<20.4f} {ours_cv:<20.4f} {cv_improvement:>+13.1f}%")
+        if mode == "avg":
+            b_val = avg(baseline.get(key, []))
+            o_val = avg(ours.get(key, []))
+        else:
+            b_val = get_last(baseline, key)
+            o_val = get_last(ours, key)
 
-    baseline_var = get_last(baseline, "util/util_variance")
-    ours_var = get_last(ours, "util/util_variance")
-    logger.info(f"{'Final Utilization Variance':<35} {baseline_var:<20.6f} {ours_var:<20.6f} {'':<15}")
+        metric_values[key] = (b_val, o_val)
 
-    baseline_max = get_last(baseline, "util/util_max")
-    ours_max = get_last(ours, "util/util_max")
-    logger.info(f"{'Final Util Max (%)':<35} {baseline_max*100:<19.3f}% {ours_max*100:<19.3f}% {'':<15}")
+        if not is_valid(b_val):
+            missing_metrics.append(f"[Baseline] {name} ({key})")
+        if not is_valid(o_val):
+            missing_metrics.append(f"[Ours] {name} ({key})")
 
-    baseline_min = get_last(baseline, "util/util_min")
-    ours_min = get_last(ours, "util/util_min")
-    logger.info(f"{'Final Util Min (%)':<35} {baseline_min*100:<19.3f}% {ours_min*100:<19.3f}% {'':<15}")
+        b_str = format_val(b_val, spec["fmt"], spec["is_pct"], spec["is_int"])
+        o_str = format_val(o_val, spec["fmt"], spec["is_pct"], spec["is_int"])
 
-    baseline_ratio = get_last(baseline, "util/balance_ratio")
-    ours_ratio = get_last(ours, "util/balance_ratio")
-    ratio_improvement = (1 - ours_ratio / max(baseline_ratio, 1e-9)) * 100 if baseline_ratio > 0 else float("nan")
-    logger.info(f"{'Final Balance Ratio (Max/Min)':<35} {baseline_ratio:<20.2f} {ours_ratio:<20.2f} {ratio_improvement:>+13.1f}%")
+        delta_str = ""
+        if spec["delta_fmt"] and is_valid(b_val) and is_valid(o_val):
+            if spec.get("delta_pct"):
+                if b_val > 0:
+                    improvement = (1 - o_val / b_val) * 100
+                    delta_str = f"{improvement:{spec['delta_fmt']}}%"
+            else:
+                delta = o_val - b_val
+                delta_str = f"{delta:{spec['delta_fmt']}}"
 
-    baseline_under = int(get_last(baseline, "util/underutilized_count", config.num_experts))
-    ours_under = int(get_last(ours, "util/underutilized_count", config.num_experts))
-    under_reduction = baseline_under - ours_under
-    logger.info(f"{'Underutilized Experts':<35} {baseline_under:<20d} {ours_under:<20d} {under_reduction:>+12d}")
-
-    baseline_tail = int(get_last(baseline, "util/long_tail_experts_count", config.num_experts))
-    ours_tail = int(get_last(ours, "util/long_tail_experts_count", config.num_experts))
-    tail_reduction = baseline_tail - ours_tail
-    logger.info(f"{'Long-tail Experts (<30% mean)':<35} {baseline_tail:<20d} {ours_tail:<20d} {tail_reduction:>+12d}")
-
-    baseline_unique = int(get_last(baseline, "routing/unique_experts_used", 0))
-    ours_unique = int(get_last(ours, "routing/unique_experts_used", 0))
-    unique_increase = ours_unique - baseline_unique
-    logger.info(f"{'Unique Experts Activated':<35} {baseline_unique:<20d} {ours_unique:<20d} {unique_increase:>+12d}")
-
-    baseline_top1 = get_last(baseline, "routing/top1_expert_share")
-    ours_top1 = get_last(ours, "routing/top1_expert_share")
-    logger.info(f"{'Top-1 Expert Share (%)':<35} {baseline_top1*100:<19.2f}% {ours_top1*100:<19.2f}% {'':<15}")
-
-    ours_force_ratio = avg(ours.get("routing/force_ratio", []))
-    ours_redirect_ratio = avg(ours.get("routing/redirect_ratio", []))
-    ours_both_ratio = avg(ours.get("routing/both_ratio", []))
-    logger.info(f"{'Force-Assign Only %':<35} {'N/A':<20} {ours_force_ratio*100:<19.1f}% {'':<15}")
-    logger.info(f"{'Cluster-Redirect Only %':<35} {'N/A':<20} {ours_redirect_ratio*100:<19.1f}% {'':<15}")
-    logger.info(f"{'Both Force+Redirect %':<35} {'N/A':<20} {ours_both_ratio*100:<19.1f}% {'':<15}")
+        logger.info(f"{name:<35} {b_str} {o_str} {delta_str:<15}")
 
     logger.info("-" * 90)
+
+    if missing_metrics:
+        logger.warning("\nMISSING METRICS (cannot compute meaningful comparison):")
+        for m in missing_metrics:
+            logger.warning(f"  - {m}")
+
     logger.info("\nCONCLUSION:")
-    if not (baseline_cv != float("nan") and ours_cv != float("nan")):
-        logger.info("  Cannot evaluate: missing CV² data")
-    elif ours_cv < baseline_cv * 0.1:
-        logger.info(f"  Load balancer HIGHLY EFFECTIVE: CV² reduced by {cv_improvement:.1f}% (>90%)!")
-        logger.info(f"  Long-tail experts: {baseline_tail} -> {ours_tail}, Underutilized: {baseline_under} -> {ours_under}")
-    elif ours_cv < baseline_cv * 0.5:
-        logger.info(f"  Load balancer EFFECTIVE: CV² reduced by {cv_improvement:.1f}% (>50%)!")
-        logger.info(f"  Long-tail experts: {baseline_tail} -> {ours_tail}, Underutilized: {baseline_under} -> {ours_under}")
-    elif ours_cv < baseline_cv:
-        logger.info(f"  Load balancer has SOME effect: CV² reduced by {cv_improvement:.1f}%")
+    primary_key = "util/util_cv_sq"
+    b_cv, o_cv = metric_values.get(primary_key, (float("nan"), float("nan")))
+    b_tail, o_tail = metric_values.get("util/long_tail_experts_count", (float("nan"), float("nan")))
+    b_under, o_under = metric_values.get("util/underutilized_count", (float("nan"), float("nan")))
+    b_ratio, o_ratio = metric_values.get("util/balance_ratio", (float("nan"), float("nan")))
+
+    if not is_valid(b_cv) or not is_valid(o_cv):
+        logger.error("  Cannot evaluate: PRIMARY metric 'util/util_cv_sq' is missing on one or both sides")
+        if not is_valid(b_cv):
+            logger.error(f"    - Baseline CV^2: MISSING")
+        if not is_valid(o_cv):
+            logger.error(f"    - Ours CV^2: MISSING")
+    elif o_cv < b_cv * 0.1:
+        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+        logger.info(f"  [OK] Load balancer HIGHLY EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>90%)!")
+        if is_valid(b_tail) and is_valid(o_tail):
+            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
+        if is_valid(b_under) and is_valid(o_under):
+            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
+        if is_valid(b_ratio) and is_valid(o_ratio):
+            logger.info(f"     Balance ratio: {b_ratio:.1f}x -> {o_ratio:.1f}x")
+    elif o_cv < b_cv * 0.5:
+        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+        logger.info(f"  [OK] Load balancer EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>50%)!")
+        if is_valid(b_tail) and is_valid(o_tail):
+            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
+        if is_valid(b_under) and is_valid(o_under):
+            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
+    elif o_cv < b_cv:
+        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+        logger.info(f"  [WARN] Load balancer has SOME effect: CV^2 reduced by {cv_improvement:.1f}%")
     else:
-        logger.warning(f"  Load balancer NOT effective: CV² worsened from {baseline_cv:.4f} to {ours_cv:.4f}")
+        cv_worsen = (o_cv / max(b_cv, 1e-9) - 1) * 100
+        logger.warning(f"  [FAIL] Load balancer NOT effective: CV^2 worsened by {cv_worsen:.1f}% ({b_cv:.4f} -> {o_cv:.4f})")
 
     output_dir = config.output_dir
     with open(os.path.join(output_dir, "ablation_baseline.json"), "w") as f:
@@ -747,8 +913,22 @@ def run_ablation(config):
     with open(os.path.join(output_dir, "ablation_ours.json"), "w") as f:
         json.dump({k: [v.item() if isinstance(v, torch.Tensor) else v for v in vals]
                    for k, vals in ours.items()}, f, indent=2)
+    with open(os.path.join(output_dir, "ablation_summary.json"), "w") as f:
+        summary = {
+            "missing_metrics": missing_metrics,
+            "metrics": {
+                spec["key"]: {
+                    "name": spec["name"],
+                    "baseline": metric_values[spec["key"]][0],
+                    "ours": metric_values[spec["key"]][1],
+                    "mode": spec["mode"],
+                } for spec in METRIC_SPECS
+            }
+        }
+        json.dump(summary, f, indent=2, default=str)
 
     logger.info(f"\nFull histories saved to {output_dir}/ablation_*.json")
+    logger.info(f"Summary saved to {output_dir}/ablation_summary.json")
 
     return baseline, ours
 
