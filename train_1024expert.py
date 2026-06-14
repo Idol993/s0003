@@ -633,26 +633,25 @@ def train(config, enable_balancer: bool = True):
     return dict(history)
 
 
-def run_ablation(config):
+def print_ablation_summary(
+    baseline: Dict[str, List[float]],
+    ours: Dict[str, List[float]],
+    output_dir: str,
+) -> Dict:
+    """Print ablation comparison table + conclusion, and save JSON artifacts.
+
+    This is decoupled from training so it can be unit-tested with injected
+    (possibly incomplete) histories.
+
+    Returns a dict with:
+      - missing_metrics: list of "[Side] Metric Name (key)" strings
+      - missing_baseline: list of (name, key) tuples
+      - missing_ours: list of (name, key) tuples
+      - metric_values: {key: (baseline_val, ours_val)}
+      - has_missing: bool
+    """
+
     logger.info("=" * 90)
-    logger.info("ABLATION EXPERIMENT: Balancer ON vs OFF")
-    logger.info("=" * 90)
-
-    logger.info("\n" + ">" * 60)
-    logger.info("RUN 1/2: Balancer OFF (Baseline)")
-    logger.info(">" * 60)
-    baseline = train(config, enable_balancer=False)
-
-    torch.manual_seed(config.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(config.seed)
-
-    logger.info("\n" + ">" * 60)
-    logger.info("RUN 2/2: Balancer ON (Ours)")
-    logger.info(">" * 60)
-    ours = train(config, enable_balancer=True)
-
-    logger.info("\n" + "=" * 90)
     logger.info("ABLATION COMPARISON SUMMARY")
     logger.info("=" * 90)
 
@@ -827,6 +826,8 @@ def run_ablation(config):
     logger.info("-" * 90)
 
     missing_metrics = []
+    missing_baseline = []
+    missing_ours = []
     metric_values = {}
 
     for spec in METRIC_SPECS:
@@ -845,8 +846,10 @@ def run_ablation(config):
 
         if not is_valid(b_val):
             missing_metrics.append(f"[Baseline] {name} ({key})")
+            missing_baseline.append((name, key))
         if not is_valid(o_val):
             missing_metrics.append(f"[Ours] {name} ({key})")
+            missing_ours.append((name, key))
 
         b_str = format_val(b_val, spec["fmt"], spec["is_pct"], spec["is_int"])
         o_str = format_val(o_val, spec["fmt"], spec["is_pct"], spec["is_int"])
@@ -865,48 +868,63 @@ def run_ablation(config):
 
     logger.info("-" * 90)
 
-    if missing_metrics:
-        logger.warning("\nMISSING METRICS (cannot compute meaningful comparison):")
-        for m in missing_metrics:
-            logger.warning(f"  - {m}")
-
     logger.info("\nCONCLUSION:")
-    primary_key = "util/util_cv_sq"
-    b_cv, o_cv = metric_values.get(primary_key, (float("nan"), float("nan")))
-    b_tail, o_tail = metric_values.get("util/long_tail_experts_count", (float("nan"), float("nan")))
-    b_under, o_under = metric_values.get("util/underutilized_count", (float("nan"), float("nan")))
-    b_ratio, o_ratio = metric_values.get("util/balance_ratio", (float("nan"), float("nan")))
 
-    if not is_valid(b_cv) or not is_valid(o_cv):
-        logger.error("  Cannot evaluate: PRIMARY metric 'util/util_cv_sq' is missing on one or both sides")
-        if not is_valid(b_cv):
-            logger.error(f"    - Baseline CV^2: MISSING")
-        if not is_valid(o_cv):
-            logger.error(f"    - Ours CV^2: MISSING")
-    elif o_cv < b_cv * 0.1:
-        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
-        logger.info(f"  [OK] Load balancer HIGHLY EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>90%)!")
-        if is_valid(b_tail) and is_valid(o_tail):
-            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
-        if is_valid(b_under) and is_valid(o_under):
-            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
-        if is_valid(b_ratio) and is_valid(o_ratio):
-            logger.info(f"     Balance ratio: {b_ratio:.1f}x -> {o_ratio:.1f}x")
-    elif o_cv < b_cv * 0.5:
-        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
-        logger.info(f"  [OK] Load balancer EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>50%)!")
-        if is_valid(b_tail) and is_valid(o_tail):
-            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
-        if is_valid(b_under) and is_valid(o_under):
-            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
-    elif o_cv < b_cv:
-        cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
-        logger.info(f"  [WARN] Load balancer has SOME effect: CV^2 reduced by {cv_improvement:.1f}%")
+    has_missing = len(missing_metrics) > 0
+
+    if has_missing:
+        logger.error("  [FAIL] Ablation comparison INCOMPLETE — missing metric data detected.")
+        logger.error("  Cannot produce reliable effectiveness conclusion.")
+        logger.error("")
+        if missing_baseline:
+            logger.error(f"  Missing on BASELINE (No Balancer) — {len(missing_baseline)} field(s):")
+            for name, key in missing_baseline:
+                logger.error(f"    - {name}  (key: {key})")
+            logger.error("")
+        if missing_ours:
+            logger.error(f"  Missing on OURS (With Balancer) — {len(missing_ours)} field(s):")
+            for name, key in missing_ours:
+                logger.error(f"    - {name}  (key: {key})")
+            logger.error("")
+        skipped = []
+        for spec in METRIC_SPECS:
+            if spec["delta_fmt"]:
+                bv, ov = metric_values.get(spec["key"], (float("nan"), float("nan")))
+                if not is_valid(bv) or not is_valid(ov):
+                    skipped.append(spec["name"])
+        if skipped:
+            logger.error(f"  Improvement calculations SKIPPED for {len(skipped)} metric(s):")
+            for s in skipped:
+                logger.error(f"    - {s}")
+            logger.error("")
+        logger.error("  ACTION REQUIRED: Ensure training runs complete all reporting steps "
+                      "before drawing conclusions.")
+        logger.error("  Full metric history saved to ablation_*.json for inspection.")
     else:
-        cv_worsen = (o_cv / max(b_cv, 1e-9) - 1) * 100
-        logger.warning(f"  [FAIL] Load balancer NOT effective: CV^2 worsened by {cv_worsen:.1f}% ({b_cv:.4f} -> {o_cv:.4f})")
+        primary_key = "util/util_cv_sq"
+        b_cv, o_cv = metric_values.get(primary_key, (float("nan"), float("nan")))
+        b_tail, o_tail = metric_values.get("util/long_tail_experts_count", (float("nan"), float("nan")))
+        b_under, o_under = metric_values.get("util/underutilized_count", (float("nan"), float("nan")))
+        b_ratio, o_ratio = metric_values.get("util/balance_ratio", (float("nan"), float("nan")))
 
-    output_dir = config.output_dir
+        if o_cv < b_cv * 0.1:
+            cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+            logger.info(f"  [OK] Load balancer HIGHLY EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>90%)!")
+            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
+            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
+            logger.info(f"     Balance ratio: {b_ratio:.1f}x -> {o_ratio:.1f}x")
+        elif o_cv < b_cv * 0.5:
+            cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+            logger.info(f"  [OK] Load balancer EFFECTIVE: CV^2 reduced by {cv_improvement:.1f}% (>50%)!")
+            logger.info(f"     Long-tail experts: {int(b_tail)} -> {int(o_tail)}")
+            logger.info(f"     Underutilized: {int(b_under)} -> {int(o_under)}")
+        elif o_cv < b_cv:
+            cv_improvement = (1 - o_cv / max(b_cv, 1e-9)) * 100
+            logger.info(f"  [WARN] Load balancer has SOME effect: CV^2 reduced by {cv_improvement:.1f}%")
+        else:
+            cv_worsen = (o_cv / max(b_cv, 1e-9) - 1) * 100
+            logger.warning(f"  [FAIL] Load balancer NOT effective: CV^2 worsened by {cv_worsen:.1f}% ({b_cv:.4f} -> {o_cv:.4f})")
+
     with open(os.path.join(output_dir, "ablation_baseline.json"), "w") as f:
         json.dump({k: [v.item() if isinstance(v, torch.Tensor) else v for v in vals]
                    for k, vals in baseline.items()}, f, indent=2)
@@ -916,6 +934,9 @@ def run_ablation(config):
     with open(os.path.join(output_dir, "ablation_summary.json"), "w") as f:
         summary = {
             "missing_metrics": missing_metrics,
+            "missing_baseline": [{"name": n, "key": k} for n, k in missing_baseline],
+            "missing_ours": [{"name": n, "key": k} for n, k in missing_ours],
+            "has_missing": has_missing,
             "metrics": {
                 spec["key"]: {
                     "name": spec["name"],
@@ -930,7 +951,37 @@ def run_ablation(config):
     logger.info(f"\nFull histories saved to {output_dir}/ablation_*.json")
     logger.info(f"Summary saved to {output_dir}/ablation_summary.json")
 
-    return baseline, ours
+    return {
+        "missing_metrics": missing_metrics,
+        "missing_baseline": missing_baseline,
+        "missing_ours": missing_ours,
+        "metric_values": metric_values,
+        "has_missing": has_missing,
+    }
+
+
+def run_ablation(config):
+    logger.info("=" * 90)
+    logger.info("ABLATION EXPERIMENT: Balancer ON vs OFF")
+    logger.info("=" * 90)
+
+    logger.info("\n" + ">" * 60)
+    logger.info("RUN 1/2: Balancer OFF (Baseline)")
+    logger.info(">" * 60)
+    baseline = train(config, enable_balancer=False)
+
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
+
+    logger.info("\n" + ">" * 60)
+    logger.info("RUN 2/2: Balancer ON (Ours)")
+    logger.info(">" * 60)
+    ours = train(config, enable_balancer=True)
+
+    summary_info = print_ablation_summary(baseline, ours, config.output_dir)
+
+    return baseline, ours, summary_info
 
 
 def main():
