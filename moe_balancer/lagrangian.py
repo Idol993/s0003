@@ -118,7 +118,8 @@ class LagrangianBalancer(nn.Module):
         probs = F.softmax(gate_logits, dim=-1)
         f_i = probs.mean(dim=0)
         log_f_i = torch.log(f_i.clamp_min(1e-9))
-        load_loss = (f_i * log_f_i).sum() * n
+        entropy_loss = -(f_i * log_f_i).sum() * n
+        load_loss = entropy_loss
 
         total_penalty = (
             aug_lagrangian

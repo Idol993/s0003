@@ -101,8 +101,6 @@ class DistributedMoELayer(nn.Module):
         residual = hidden_states
         hidden_states = self.input_ln(hidden_states)
 
-        self._maybe_update_clustering()
-
         gate_out: GateOutput = self.gate(
             hidden_states,
             tracker=self.utilization_tracker,
@@ -125,9 +123,6 @@ class DistributedMoELayer(nn.Module):
             expert_indices,
             expert_weights,
         )
-
-        if training:
-            self._track_utilization(gate_out)
 
         output = residual + expert_output
 
@@ -211,3 +206,39 @@ class DistributedMoELayer(nn.Module):
     def reset_tracking(self):
         self.utilization_tracker.reset()
         self._global_step = 0
+
+    def step_balancers(
+        self,
+        gate_output: GateOutput,
+    ) -> Dict[str, float]:
+        step_util = gate_output.step_utilization
+        expert_indices = gate_output.expert_indices
+        expert_weights = gate_output.expert_weights
+
+        batch_size, seq_len, top_k = expert_weights.shape
+        flat_weights = expert_weights.reshape(-1, top_k).detach()
+        flat_indices = expert_indices.reshape(-1, top_k).detach()
+
+        self.utilization_tracker.update(flat_weights, flat_indices)
+
+        lagrangian_info = self.lagrangian_balancer.step_multipliers(step_util)
+
+        clustering_info = {}
+        if self.clusterer.needs_update(self._global_step):
+            try:
+                expert_reps = self.experts.get_expert_representations()
+                self.clusterer.compute_similarity_from_parameters(expert_reps)
+                clustering = self.clusterer.cluster_experts_kmeans()
+                self._last_clustering = clustering
+                self.clusterer.mark_updated(self._global_step)
+                clustering_info = {
+                    "clusterer/updated": True,
+                    "clusterer/num_clusters": clustering.num_clusters,
+                    "clusterer/size_std": clustering.cluster_sizes.float().std().item(),
+                }
+            except Exception as e:
+                logger.warning(f"Clustering update failed at step {self._global_step}: {e}")
+                clustering_info = {"clusterer/updated": False, "clusterer/error": str(e)}
+
+        update_info = {**lagrangian_info, **clustering_info}
+        return update_info

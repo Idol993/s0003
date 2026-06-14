@@ -296,9 +296,7 @@ class SmartMoEGate(nn.Module):
             loss_info["total_aux_loss"] = total_aux.item() if isinstance(total_aux, torch.Tensor) else total_aux
             loss_info.update(lb_info)
 
-        with torch.no_grad():
-            full_weights = F.softmax(adjusted_logits, dim=-1)
-            step_util = full_weights.mean(dim=0).detach()
+        expert_indices = top_indices.view(batch_size, seq_len, self.top_k)
         expert_weights_out = expert_weights.view(batch_size, seq_len, self.top_k)
         raw_logits_out = raw_logits.view(batch_size, seq_len, self.num_experts)
         adj_logits_out = adjusted_logits.view(batch_size, seq_len, self.num_experts)
@@ -307,6 +305,7 @@ class SmartMoEGate(nn.Module):
 
         with torch.no_grad():
             full_weights = F.softmax(adjusted_logits, dim=-1)
+            step_util = full_weights.mean(dim=0).detach()
             top1_idx = full_weights.argmax(dim=-1)
             unique, counts = torch.unique(top1_idx, return_counts=True)
             routing_stats["num_unique_routed"] = len(unique)
@@ -324,6 +323,7 @@ class SmartMoEGate(nn.Module):
             force_assign_mask=force_mask_out,
             cluster_redirect_mask=redirect_mask_out,
             aux_loss=aux_loss,
+            step_utilization=step_util,
             loss_info=loss_info,
             routing_stats=routing_stats,
         )
