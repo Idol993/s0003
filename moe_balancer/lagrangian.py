@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Dict
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
@@ -118,8 +119,10 @@ class LagrangianBalancer(nn.Module):
         probs = F.softmax(gate_logits, dim=-1)
         f_i = probs.mean(dim=0)
         log_f_i = torch.log(f_i.clamp_min(1e-9))
-        entropy_loss = -(f_i * log_f_i).sum() * n
-        load_loss = entropy_loss
+        entropy = -(f_i * log_f_i).sum()
+        max_entropy = math.log(n) if n > 1 else 1.0
+        entropy_gap = max_entropy - entropy
+        load_loss = entropy_gap * n
 
         total_penalty = (
             aug_lagrangian

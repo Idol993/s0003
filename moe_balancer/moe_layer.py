@@ -182,15 +182,25 @@ class DistributedMoELayer(nn.Module):
 
     def get_balance_report(self) -> Dict[str, Any]:
         stats = self.utilization_tracker.get_stats()
+        util = stats.moving_avg_utilization.cpu()
+        long_tail_count = (util < util.mean() * 0.3).sum().item()
         report = {
             "step": self._global_step,
             "total_tokens": stats.total_tokens_processed,
+            "cv_sq": stats.utilization_cv ** 2,
+            "util_cv": stats.utilization_cv,
             "utilization_cv": stats.utilization_cv,
             "balance_ratio": stats.balance_ratio,
+            "util_max": util.max().item(),
+            "util_min": util.min().item(),
+            "util_mean": util.mean().item(),
+            "util_std": util.std().item(),
+            "util_variance": stats.utilization_variance,
             "underutilized_experts": stats.low_utilization_experts.tolist(),
             "overutilized_experts": stats.high_utilization_experts.tolist(),
             "num_under": len(stats.low_utilization_experts),
             "num_over": len(stats.high_utilization_experts),
+            "long_tail_count": long_tail_count,
             "lambda_stats": {
                 "plus_mean": self.lagrangian_balancer._lambda_plus.mean().item(),
                 "plus_max": self.lagrangian_balancer._lambda_plus.max().item(),

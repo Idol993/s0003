@@ -39,12 +39,15 @@ logger = get_logger(__name__)
 @dataclass
 class BatchRoutingStats:
     total_tokens: int
+    total_routing_slots: int
     normal_routed_tokens: int
-    force_assigned_tokens: int
-    cluster_redirected_tokens: int
+    force_assigned_only_tokens: int
+    cluster_redirected_only_tokens: int
+    both_force_and_redirect_tokens: int
     normal_ratio: float
     force_ratio: float
     redirect_ratio: float
+    both_ratio: float
     expert_hit_counts: torch.Tensor
     unique_experts_used: int
     top1_expert_share: float
@@ -196,6 +199,7 @@ def compute_batch_routing_stats(
 ) -> BatchRoutingStats:
     batch_size, seq_len, top_k = gate_output.expert_indices.shape
     num_tokens = batch_size * seq_len
+    num_slots = num_tokens * top_k
 
     expert_indices_flat = gate_output.expert_indices.reshape(-1).cpu()
     force_mask_flat = gate_output.force_assign_mask.reshape(-1).cpu()
@@ -205,6 +209,14 @@ def compute_batch_routing_stats(
     only_force = force_mask_flat & (~redirect_mask_flat)
     only_redirect = redirect_mask_flat & (~force_mask_flat)
     normal = ~(force_mask_flat | redirect_mask_flat)
+
+    total_accounted = normal.sum().item() + only_force.sum().item() + only_redirect.sum().item() + both_mask.sum().item()
+    assert total_accounted == num_slots, (
+        f"Routing slot mismatch: total={num_slots}, "
+        f"accounted={total_accounted} "
+        f"(normal={normal.sum().item()}, only_force={only_force.sum().item()}, "
+        f"only_redirect={only_redirect.sum().item()}, both={both_mask.sum().item()})"
+    )
 
     expert_hit_counts = torch.bincount(
         expert_indices_flat,
@@ -222,12 +234,15 @@ def compute_batch_routing_stats(
 
     return BatchRoutingStats(
         total_tokens=num_tokens,
+        total_routing_slots=num_slots,
         normal_routed_tokens=normal.sum().item(),
-        force_assigned_tokens=only_force.sum().item(),
-        cluster_redirected_tokens=only_redirect.sum().item(),
+        force_assigned_only_tokens=only_force.sum().item(),
+        cluster_redirected_only_tokens=only_redirect.sum().item(),
+        both_force_and_redirect_tokens=both_mask.sum().item(),
         normal_ratio=normal.float().mean().item(),
         force_ratio=only_force.float().mean().item(),
         redirect_ratio=only_redirect.float().mean().item(),
+        both_ratio=both_mask.float().mean().item(),
         expert_hit_counts=expert_hit_counts,
         unique_experts_used=(expert_hit_counts > 0).sum().item(),
         top1_expert_share=top1_share.item(),
@@ -382,10 +397,12 @@ def print_routing_report(
     logger.info("")
     logger.info("--- Routing Stats ---")
     logger.info(f"  Total tokens:        {routing_stats.total_tokens}")
-    logger.info(f"  Normal top-2 routing:   {routing_stats.normal_routed_tokens:6d}  ({routing_stats.normal_ratio*100:5.1f}%)")
-    logger.info(f"  Forced assignment (balancing):  {routing_stats.force_assigned_tokens:6d}  ({routing_stats.force_ratio*100:5.1f}%)")
-    logger.info(f"  Cluster redirect (balancing): {routing_stats.cluster_redirected_tokens:6d}  ({routing_stats.redirect_ratio*100:5.1f}%)")
-    logger.info(f"  Unique experts used:          {routing_stats.unique_experts_used}/{num_experts}")
+    logger.info(f"  Total routing slots: {routing_stats.total_routing_slots}  ({routing_stats.total_tokens} tokens x top-2)")
+    logger.info(f"  Normal top-2 routing:       {routing_stats.normal_routed_tokens:6d}  ({routing_stats.normal_ratio*100:5.1f}%)")
+    logger.info(f"  Forced assignment only:     {routing_stats.force_assigned_only_tokens:6d}  ({routing_stats.force_ratio*100:5.1f}%)")
+    logger.info(f"  Cluster redirect only:      {routing_stats.cluster_redirected_only_tokens:6d}  ({routing_stats.redirect_ratio*100:5.1f}%)")
+    logger.info(f"  Both force+redirect:        {routing_stats.both_force_and_redirect_tokens:6d}  ({routing_stats.both_ratio*100:5.1f}%)")
+    logger.info(f"  Unique experts used:        {routing_stats.unique_experts_used}/{num_experts}")
     logger.info(f"  Top1 expert share:       {routing_stats.top1_expert_share*100:5.2f}%")
     logger.info(f"  Top5 expert share:       {routing_stats.top5_expert_share*100:5.2f}%")
     logger.info(f"  Routing entropy:              {routing_stats.routing_entropy:.4f}")
@@ -552,6 +569,14 @@ def train(config, enable_balancer: bool = True):
             for layer_idx, layer in enumerate(model.moe_layers):
                 if layer_idx < len(all_gate_outputs):
                     layer.step_balancers(all_gate_outputs[layer_idx])
+        else:
+            for layer_idx, layer in enumerate(model.moe_layers):
+                if layer_idx < len(all_gate_outputs):
+                    go = all_gate_outputs[layer_idx]
+                    batch_size, seq_len, top_k = go.expert_weights.shape
+                    flat_weights = go.expert_weights.reshape(-1, top_k).detach()
+                    flat_indices = go.expert_indices.reshape(-1, top_k).detach()
+                    layer.utilization_tracker.update(flat_weights, flat_indices)
 
         optimizer.step()
         scheduler.step()
@@ -574,12 +599,10 @@ def train(config, enable_balancer: bool = True):
 
             routing_stats = compute_batch_routing_stats(gate0, moe_config.num_experts, device)
 
-            util_metrics = None
-            if enable_balancer:
-                util_metrics = compute_utilization_metrics(
-                    layer0.utilization_tracker,
-                    moe_config.num_experts,
-                )
+            util_metrics = compute_utilization_metrics(
+                layer0.utilization_tracker,
+                moe_config.num_experts,
+            )
 
             loss_metrics = compute_loss_metrics(
                 task_loss_val,
@@ -633,60 +656,89 @@ def run_ablation(config):
     logger.info("ABLATION COMPARISON SUMMARY")
     logger.info("=" * 90)
 
-    def avg(lst, last_n=100):
+    def avg(lst, last_n=50):
+        if not lst:
+            return float("nan")
         return sum(lst[-last_n:]) / max(len(lst[-last_n:]), 1)
 
-    logger.info(f"{'Metric':<35} {'Baseline (No Bal)':<20} {'Ours (With Bal)':<20} {'Improvement':<15}")
+    def get_last(history, key, default=float("nan")):
+        vals = history.get(key, [])
+        return vals[-1] if vals else default
+
+    logger.info(f"{'Metric':<35} {'Baseline (No Bal)':<20} {'Ours (With Bal)':<20} {'Delta':<15}")
     logger.info("-" * 90)
 
-    baseline_task = avg(baseline["loss/task"])
-    ours_task = avg(ours["loss/task"])
-    logger.info(f"{'Final Task Loss':<35} {baseline_task:<20.4f} {ours_task:<20.4f} {'':<15}")
+    baseline_task = avg(baseline.get("loss/task", []))
+    ours_task = avg(ours.get("loss/task", []))
+    task_delta = ours_task - baseline_task
+    logger.info(f"{'Task Loss (avg last 50)':<35} {baseline_task:<20.4f} {ours_task:<20.4f} {task_delta:>+14.4f}")
 
-    if "util/util_cv_sq" in ours:
-        baseline_cv = baseline.get("util/util_cv_sq", [float("inf")])[-1]
-        ours_cv = ours["util/util_cv_sq"][-1]
-        cv_improvement = (1 - ours_cv / max(baseline_cv, 1e-9)) * 100
-        logger.info(f"{'Final Utilization CV²':<35} {baseline_cv:<20.4f} {ours_cv:<20.4f} {cv_improvement:>12.1f}%")
+    baseline_aux = avg(baseline.get("loss/aux", []))
+    ours_aux = avg(ours.get("loss/aux", []))
+    logger.info(f"{'Aux Loss (avg last 50)':<35} {baseline_aux:<20.4f} {ours_aux:<20.4f} {'':<15}")
 
-    if "util/balance_ratio" in ours:
-        baseline_ratio = baseline.get("util/balance_ratio", [float("inf")])[-1]
-        ours_ratio = ours["util/balance_ratio"][-1]
-        ratio_improvement = (1 - ours_ratio / max(baseline_ratio, 1e-9)) * 100
-        logger.info(f"{'Final Balance Ratio':<35} {baseline_ratio:<20.2f} {ours_ratio:<20.2f} {ratio_improvement:>12.1f}%")
+    baseline_cv = get_last(baseline, "util/util_cv_sq")
+    ours_cv = get_last(ours, "util/util_cv_sq")
+    cv_improvement = (1 - ours_cv / max(baseline_cv, 1e-9)) * 100 if baseline_cv > 0 else float("nan")
+    logger.info(f"{'Final Utilization CV²':<35} {baseline_cv:<20.4f} {ours_cv:<20.4f} {cv_improvement:>+13.1f}%")
 
-    if "util/underutilized_count" in ours:
-        baseline_under = baseline.get("util/underutilized_count", [config.num_experts])[-1]
-        ours_under = ours["util/underutilized_count"][-1]
-        under_reduction = baseline_under - ours_under
-        logger.info(f"{'Underutilized Experts':<35} {baseline_under:<20d} {ours_under:<20d} {under_reduction:>+12d}")
+    baseline_var = get_last(baseline, "util/util_variance")
+    ours_var = get_last(ours, "util/util_variance")
+    logger.info(f"{'Final Utilization Variance':<35} {baseline_var:<20.6f} {ours_var:<20.6f} {'':<15}")
 
-    if "util/long_tail_experts_count" in ours:
-        baseline_tail = baseline.get("util/long_tail_experts_count", [config.num_experts])[-1]
-        ours_tail = ours["util/long_tail_experts_count"][-1]
-        tail_reduction = baseline_tail - ours_tail
-        logger.info(f"{'Long-tail Experts (<30% mean)':<35} {baseline_tail:<20d} {ours_tail:<20d} {tail_reduction:>+12d}")
+    baseline_max = get_last(baseline, "util/util_max")
+    ours_max = get_last(ours, "util/util_max")
+    logger.info(f"{'Final Util Max (%)':<35} {baseline_max*100:<19.3f}% {ours_max*100:<19.3f}% {'':<15}")
 
-    if "routing/unique_experts_used" in ours:
-        baseline_unique = baseline.get("routing/unique_experts_used", [0])[-1]
-        ours_unique = ours["routing/unique_experts_used"][-1]
-        unique_increase = ours_unique - baseline_unique
-        logger.info(f"{'Unique Experts Activated':<35} {baseline_unique:<20d} {ours_unique:<20d} {unique_increase:>+12d}")
+    baseline_min = get_last(baseline, "util/util_min")
+    ours_min = get_last(ours, "util/util_min")
+    logger.info(f"{'Final Util Min (%)':<35} {baseline_min*100:<19.3f}% {ours_min*100:<19.3f}% {'':<15}")
 
-    if "routing/force_assigned_tokens" in ours:
-        logger.info(f"{'Force-Assigned Tokens %':<35} {'N/A':<20} {avg(ours['routing/force_ratio'])*100:<19.1f}% {'':<15}")
-    if "routing/cluster_redirected_tokens" in ours:
-        logger.info(f"{'Cluster-Redirected Tokens %':<35} {'N/A':<20} {avg(ours['routing/redirect_ratio'])*100:<19.1f}% {'':<15}")
+    baseline_ratio = get_last(baseline, "util/balance_ratio")
+    ours_ratio = get_last(ours, "util/balance_ratio")
+    ratio_improvement = (1 - ours_ratio / max(baseline_ratio, 1e-9)) * 100 if baseline_ratio > 0 else float("nan")
+    logger.info(f"{'Final Balance Ratio (Max/Min)':<35} {baseline_ratio:<20.2f} {ours_ratio:<20.2f} {ratio_improvement:>+13.1f}%")
+
+    baseline_under = int(get_last(baseline, "util/underutilized_count", config.num_experts))
+    ours_under = int(get_last(ours, "util/underutilized_count", config.num_experts))
+    under_reduction = baseline_under - ours_under
+    logger.info(f"{'Underutilized Experts':<35} {baseline_under:<20d} {ours_under:<20d} {under_reduction:>+12d}")
+
+    baseline_tail = int(get_last(baseline, "util/long_tail_experts_count", config.num_experts))
+    ours_tail = int(get_last(ours, "util/long_tail_experts_count", config.num_experts))
+    tail_reduction = baseline_tail - ours_tail
+    logger.info(f"{'Long-tail Experts (<30% mean)':<35} {baseline_tail:<20d} {ours_tail:<20d} {tail_reduction:>+12d}")
+
+    baseline_unique = int(get_last(baseline, "routing/unique_experts_used", 0))
+    ours_unique = int(get_last(ours, "routing/unique_experts_used", 0))
+    unique_increase = ours_unique - baseline_unique
+    logger.info(f"{'Unique Experts Activated':<35} {baseline_unique:<20d} {ours_unique:<20d} {unique_increase:>+12d}")
+
+    baseline_top1 = get_last(baseline, "routing/top1_expert_share")
+    ours_top1 = get_last(ours, "routing/top1_expert_share")
+    logger.info(f"{'Top-1 Expert Share (%)':<35} {baseline_top1*100:<19.2f}% {ours_top1*100:<19.2f}% {'':<15}")
+
+    ours_force_ratio = avg(ours.get("routing/force_ratio", []))
+    ours_redirect_ratio = avg(ours.get("routing/redirect_ratio", []))
+    ours_both_ratio = avg(ours.get("routing/both_ratio", []))
+    logger.info(f"{'Force-Assign Only %':<35} {'N/A':<20} {ours_force_ratio*100:<19.1f}% {'':<15}")
+    logger.info(f"{'Cluster-Redirect Only %':<35} {'N/A':<20} {ours_redirect_ratio*100:<19.1f}% {'':<15}")
+    logger.info(f"{'Both Force+Redirect %':<35} {'N/A':<20} {ours_both_ratio*100:<19.1f}% {'':<15}")
 
     logger.info("-" * 90)
     logger.info("\nCONCLUSION:")
-    if "util/util_cv_sq" in ours:
-        if ours_cv < baseline_cv * 0.1:
-            logger.info("  Load balancer highly effective: CV² reduced > 90%！")
-        elif ours_cv < baseline_cv * 0.5:
-            logger.info("  Load balancer effective: CV² reduced > 50%！")
-        else:
-            logger.info("  Load balancer has some effect: CV² reduced")
+    if not (baseline_cv != float("nan") and ours_cv != float("nan")):
+        logger.info("  Cannot evaluate: missing CV² data")
+    elif ours_cv < baseline_cv * 0.1:
+        logger.info(f"  Load balancer HIGHLY EFFECTIVE: CV² reduced by {cv_improvement:.1f}% (>90%)!")
+        logger.info(f"  Long-tail experts: {baseline_tail} -> {ours_tail}, Underutilized: {baseline_under} -> {ours_under}")
+    elif ours_cv < baseline_cv * 0.5:
+        logger.info(f"  Load balancer EFFECTIVE: CV² reduced by {cv_improvement:.1f}% (>50%)!")
+        logger.info(f"  Long-tail experts: {baseline_tail} -> {ours_tail}, Underutilized: {baseline_under} -> {ours_under}")
+    elif ours_cv < baseline_cv:
+        logger.info(f"  Load balancer has SOME effect: CV² reduced by {cv_improvement:.1f}%")
+    else:
+        logger.warning(f"  Load balancer NOT effective: CV² worsened from {baseline_cv:.4f} to {ours_cv:.4f}")
 
     output_dir = config.output_dir
     with open(os.path.join(output_dir, "ablation_baseline.json"), "w") as f:

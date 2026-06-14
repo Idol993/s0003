@@ -1,0 +1,26 @@
+{
+  "step": 40,
+  "total_tokens": 1280,
+  "cv_sq": 0.014468175781639003,
+  "util_cv": 0.12028373032808304,
+  "utilization_cv": 0.12028373032808304,
+  "balance_ratio": 1.7421996593475342,
+  "util_max": 0.04092717543244362,
+  "util_min": 0.023491667583584785,
+  "util_mean": 0.03125,
+  "util_std": 0.003758866572752595,
+  "util_variance": 1.412907791175684e-05,
+  "underutilized_experts": [],
+  "overutilized_experts": [],
+  "num_under": 0,
+  "num_over": 0,
+  "long_tail_count": 0,
+  "lambda_stats": {
+    "plus_mean": 1.0,
+    "plus_max": 1.0,
+    "minus_mean": 1.0,
+    "minus_max": 1.0
+  },
+  "num_clusters": 8,
+  "cluster_size_std": 2.672612428665161
+}

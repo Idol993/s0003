@@ -73,7 +73,7 @@ class SimpleMoELanguageModel(nn.Module):
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
 
         total_aux_loss = torch.tensor(0.0, device=input_ids.device)
-        all_metrics = []
+        all_gate_outputs = []
 
         for layer_idx in range(self.num_layers):
             residual = x
@@ -82,13 +82,14 @@ class SimpleMoELanguageModel(nn.Module):
                 x_norm, x_norm, x_norm,
                 key_padding_mask=(attention_mask == 0) if attention_mask is not None else None,
                 need_weights=False,
+                is_causal=False,
             )
             x = residual + attn_out
 
             moe_out = self.moe_layers[layer_idx](x, attention_mask=attention_mask, training=training)
             x = moe_out.hidden_states
             total_aux_loss = total_aux_loss + moe_out.total_aux_loss
-            all_metrics.append(moe_out.metrics)
+            all_gate_outputs.append(moe_out.gate_output)
 
         x = self.final_norm(x)
         logits = self.lm_head(x)
@@ -103,7 +104,7 @@ class SimpleMoELanguageModel(nn.Module):
                 ignore_index=-100,
             )
 
-        return logits, loss, total_aux_loss, all_metrics
+        return logits, loss, total_aux_loss, all_gate_outputs
 
 
 def generate_biased_data(
@@ -230,7 +231,7 @@ def train(config):
 
         optimizer.zero_grad(set_to_none=True)
 
-        logits, loss, aux_loss, all_metrics = model(
+        logits, loss, aux_loss, all_gate_outputs = model(
             input_ids,
             attention_mask=attention_mask,
             labels=labels,
@@ -244,12 +245,12 @@ def train(config):
         if config.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
 
+        for layer_idx, layer in enumerate(model.moe_layers):
+            if layer_idx < len(all_gate_outputs):
+                layer.step_balancers(all_gate_outputs[layer_idx])
+
         optimizer.step()
         scheduler.step()
-
-        for m in all_metrics:
-            for k, v in m.items():
-                history[k].append(v)
 
         history["loss/train"].append(loss.item())
         history["loss/aux"].append(aux_loss.item() if isinstance(aux_loss, torch.Tensor) else aux_loss)
@@ -261,35 +262,79 @@ def train(config):
             steps_per_sec = report_interval / elapsed
             start_time = time.time()
 
-            avg = lambda k: sum(history[k][-report_interval:]) / len(history[k][-report_interval:])
+            avg = lambda k: sum(history[k][-report_interval:]) / max(len(history[k][-report_interval:]), 1)
 
-            balance_cv = avg("util/cv_sq") if "util/cv_sq" in history else float("nan")
-            balance_ratio = avg("util/balance_ratio") if "util/balance_ratio" in history else float("nan")
-            force_ratio = avg("routing/force_assign_ratio") if "routing/force_assign_ratio" in history else float("nan")
-            redirect_ratio = avg("routing/cluster_redirect_ratio") if "routing/cluster_redirect_ratio" in history else float("nan")
-            num_under = sum(history["util/low_expert_count"][-report_interval:]) / report_interval if "util/low_expert_count" in history else -1
+            last_layer = model.moe_layers[-1]
+            report = last_layer.get_balance_report()
+
+            balance_cv = report.get("cv_sq", float("nan"))
+            balance_ratio = report.get("balance_ratio", float("nan"))
+            num_under = report.get("num_under", -1)
+            num_over = report.get("num_over", -1)
+            util_std = report.get("util_std", float("nan"))
+            util_max = report.get("util_max", float("nan"))
+            util_min = report.get("util_min", float("nan"))
+            long_tail = report.get("long_tail_count", -1)
+
+            history["util/cv_sq"].append(balance_cv)
+            history["util/balance_ratio"].append(balance_ratio)
+            history["util/util_max"].append(util_max)
+            history["util/util_min"].append(util_min)
+            history["util/util_std"].append(util_std)
+            history["util/num_under"].append(num_under)
+            history["util/num_over"].append(num_over)
+            history["util/long_tail"].append(long_tail)
+
+            gate0 = all_gate_outputs[0] if all_gate_outputs else None
+            if gate0 is not None:
+                force_mask = gate0.force_assign_mask.reshape(-1)
+                redirect_mask = gate0.cluster_redirect_mask.reshape(-1)
+                total_slots = force_mask.numel()
+                force_ratio = force_mask.float().mean().item()
+                redirect_ratio = redirect_mask.float().mean().item()
+                both_ratio = (force_mask & redirect_mask).float().mean().item()
+                normal_ratio = (~(force_mask | redirect_mask)).float().mean().item()
+                unique_experts = (torch.bincount(
+                    gate0.expert_indices.reshape(-1).cpu(),
+                    minlength=moe_config.num_experts
+                ) > 0).sum().item()
+
+                history["routing/force_ratio"].append(force_ratio)
+                history["routing/redirect_ratio"].append(redirect_ratio)
+                history["routing/both_ratio"].append(both_ratio)
+                history["routing/normal_ratio"].append(normal_ratio)
+                history["routing/unique_experts"].append(unique_experts)
+            else:
+                force_ratio = float("nan")
+                redirect_ratio = float("nan")
+                both_ratio = float("nan")
+                normal_ratio = float("nan")
 
             logger.info(
                 f"Step {step}/{config.max_steps} | "
                 f"Loss: {avg('loss/train'):.4f} "
                 f"(aux={avg('loss/aux'):.4f}) | "
-                f"Balance CV²: {balance_cv:.4f} | "
-                f"Balance Ratio: {balance_ratio:.2f} | "
-                f"Force%: {force_ratio*100:.1f}% | "
-                f"Redirect%: {redirect_ratio*100:.1f}% | "
-                f"Under Experts: {num_under} | "
+                f"CV²: {balance_cv:.4f} | "
+                f"Ratio: {balance_ratio:.2f} | "
+                f"Util: {util_max*100:.1f}%/{util_min*100:.1f}% | "
+                f"Under: {num_under} Over: {num_over} | "
                 f"Rate: {steps_per_sec:.1f} steps/s"
             )
+            logger.info(
+                f"  Routing: Normal={normal_ratio*100:.1f}% "
+                f"Force={force_ratio*100:.1f}% "
+                f"Redirect={redirect_ratio*100:.1f}% "
+                f"Both={both_ratio*100:.1f}%"
+            )
 
-            if balance_cv < best_balance and step > warmup_steps:
+            if balance_cv < best_balance and step > warmup_steps and not math.isnan(balance_cv):
                 best_balance = balance_cv
                 logger.info(f"  [IMPROVED] Best balance CV²: {best_balance:.6f}")
 
-            report = model.moe_layers[-1].get_balance_report()
             lambdas = report["lambda_stats"]
             logger.info(
-                f"  λ+: mean={lambdas['plus_mean']:.3f} max={lambdas['plus_max']:.3f} | "
-                f"λ-: mean={lambdas['minus_mean']:.3f} max={lambdas['minus_max']:.3f}"
+                f"  Lambda+: mean={lambdas['plus_mean']:.3f} max={lambdas['plus_max']:.3f} | "
+                f"Lambda-: mean={lambdas['minus_mean']:.3f} max={lambdas['minus_max']:.3f}"
             )
 
             if report.get("num_clusters"):
